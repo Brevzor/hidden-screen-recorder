@@ -157,7 +157,12 @@ impl Drop for RecorderManager {
 // Close its handle before WinRT opens the file with exclusive sharing.
 fn reserve_output(directory: &Path, stem: &str) -> std::io::Result<PathBuf> {
     for suffix in 0..u64::MAX {
-        let path = directory.join(format!("{stem}_{suffix}.mp4"));
+        let name = if suffix == 0 {
+            format!("{stem}.mp4")
+        } else {
+            format!("{stem}_{suffix}.mp4")
+        };
+        let path = directory.join(name);
         match OpenOptions::new()
             .read(true)
             .write(true)
@@ -207,8 +212,10 @@ struct CaptureFlags {
     finalization_error: Arc<Mutex<Option<String>>>,
 }
 
+pub(crate) type SharedEncoder = Arc<Mutex<Option<VideoEncoder>>>;
+
 struct Capture {
-    encoder: Option<VideoEncoder>,
+    encoder: SharedEncoder,
     stop: Arc<AtomicBool>,
     frame_interval: Duration,
     last_frame: Option<Instant>,
@@ -236,24 +243,24 @@ impl GraphicsCaptureApiHandler for Capture {
             audio_enabled,
             &ctx.flags.output,
         )?;
-        if let Some(audio) = &ctx.flags.audio {
-            audio.begin();
-        }
 
-        let _ = ctx
-            .flags
-            .events
-            .send(RecorderEvent::Started(ctx.flags.output.clone()));
-        debug_log::write("encoder created; Started event sent");
-
-        Ok(Self {
-            encoder: Some(encoder),
+        let mut capture = Self {
+            encoder: Arc::new(Mutex::new(Some(encoder))),
             stop: ctx.flags.stop,
             frame_interval: Duration::from_secs_f64(1.0 / ctx.flags.config.fps.max(1) as f64),
             last_frame: None,
             audio: ctx.flags.audio,
             finalization_error: ctx.flags.finalization_error,
-        })
+        };
+        if let Some(audio) = &mut capture.audio {
+            audio.begin(capture.encoder.clone())?;
+        }
+        let _ = ctx
+            .flags
+            .events
+            .send(RecorderEvent::Started(ctx.flags.output));
+        debug_log::write("encoder created; Started event sent");
+        Ok(capture)
     }
 
     fn on_frame_arrived(
@@ -267,11 +274,6 @@ impl GraphicsCaptureApiHandler for Capture {
             return Ok(());
         }
 
-        let encoder = self.encoder.as_mut().expect("encoder is available");
-        if let Some(audio) = &mut self.audio {
-            audio.send_pending(encoder, false)?;
-        }
-
         let now = Instant::now();
         if self
             .last_frame
@@ -279,7 +281,12 @@ impl GraphicsCaptureApiHandler for Capture {
         {
             return Ok(());
         }
-        encoder.send_frame(frame)?;
+        self.encoder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .expect("encoder is available")
+            .send_frame(frame)?;
         self.last_frame = Some(now);
         Ok(())
     }
@@ -288,18 +295,19 @@ impl GraphicsCaptureApiHandler for Capture {
 impl Drop for Capture {
     fn drop(&mut self) {
         debug_log::write("capture handler dropped; finalizing encoder");
-        if let Some(audio) = &mut self.audio {
-            audio.stop_and_join();
-            if let Some(encoder) = &mut self.encoder
-                && let Err(error) = audio.send_pending(encoder, true)
-            {
-                *self
-                    .finalization_error
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
-            }
+        if let Some(audio) = &mut self.audio
+            && let Err(error) = audio.stop_and_join()
+        {
+            *self
+                .finalization_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(error);
         }
-        if let Some(encoder) = self.encoder.take()
+        if let Some(encoder) = self
+            .encoder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
             && let Err(error) = encoder.finish()
         {
             debug_log::write(format!("encoder finalization failed: {error}"));
@@ -502,7 +510,11 @@ fn run(config: AppConfig, stop: Arc<AtomicBool>, events: Sender<RecorderEvent>) 
     };
     let output = match reserve_output(
         &config.output_dir,
-        &format!("Recording_{}", Local::now().format("%Y%m%d_%H%M%S%f")),
+        &crate::filename::render(
+            &config.filename_template,
+            Local::now().naive_local(),
+            config.monitor_index,
+        ),
     ) {
         Ok(reserved) => reserved,
         Err(error) => {
@@ -647,7 +659,7 @@ fn run_gdi(monitor: Monitor, flags: CaptureFlags) {
         }
     };
 
-    let mut encoder = match create_encoder(&config, width, height, audio.is_some(), &output) {
+    let encoder = match create_encoder(&config, width, height, audio.is_some(), &output) {
         Ok(encoder) => encoder,
         Err(error) => {
             stop.store(true, Ordering::Release);
@@ -660,22 +672,29 @@ fn run_gdi(monitor: Monitor, flags: CaptureFlags) {
         }
     };
 
-    let _ = events.send(RecorderEvent::Started(output.clone()));
-    debug_log::write(format!(
-        "GDI encoder created; Started event sent; stop={}",
-        stop.load(Ordering::Acquire)
-    ));
-
-    if let Some(audio) = &audio {
-        audio.begin();
+    let encoder = Arc::new(Mutex::new(Some(encoder)));
+    if let Some(audio) = &mut audio
+        && let Err(error) = audio.begin(encoder.clone())
+    {
+        let _ = audio.stop_and_join();
+        if let Some(encoder) = encoder.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = encoder.finish();
+        }
+        let _ = events.send(RecorderEvent::Failed(msg!(
+            "Could not start audio encoding: {error}",
+            "Не удалось запустить обработку звука: {error}"
+        )));
+        return;
     }
+    let _ = events.send(RecorderEvent::Started(output.clone()));
+    debug_log::write("GDI encoder and independent audio writer started");
     let started_at = Instant::now();
     let frame_interval = Duration::from_secs_f64(1.0 / config.fps.max(1) as f64);
     let deadline = (config.duration_minutes > 0)
         .then(|| started_at + Duration::from_secs(u64::from(config.duration_minutes) * 60));
     let mut next_frame = started_at;
 
-    let capture_result: Result<(), String> = 'capture: loop {
+    let capture_result: Result<(), String> = loop {
         if stop.load(Ordering::Acquire)
             || deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
@@ -692,12 +711,6 @@ fn run_gdi(monitor: Monitor, flags: CaptureFlags) {
             continue;
         }
 
-        if let Some(audio) = &mut audio
-            && let Err(error) = audio.send_pending(&mut encoder, false)
-        {
-            break 'capture Err(format!("audio encoding failed: {error}"));
-        }
-
         let buffer = match capture.grab(config.show_cursor) {
             Ok(buffer) => buffer,
             Err(error) => {
@@ -706,7 +719,13 @@ fn run_gdi(monitor: Monitor, flags: CaptureFlags) {
             }
         };
         let timestamp = i64::try_from(started_at.elapsed().as_nanos() / 100).unwrap_or(i64::MAX);
-        if let Err(error) = encoder.send_frame_buffer(buffer, timestamp) {
+        if let Err(error) = encoder
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+            .expect("encoder is available")
+            .send_frame_buffer(buffer, timestamp)
+        {
             let error = format!("frame encoding failed: {error}");
             debug_log::write(&error);
             break Err(error);
@@ -720,16 +739,19 @@ fn run_gdi(monitor: Monitor, flags: CaptureFlags) {
 
     stop.store(true, Ordering::Release);
     let audio_result = if let Some(audio) = &mut audio {
-        audio.stop_and_join();
-        audio
-            .send_pending(&mut encoder, true)
-            .map_err(|error| error.to_string())
+        audio.stop_and_join()
     } else {
         Ok(())
     };
     drop(audio);
     debug_log::write("finalizing GDI encoder");
-    let finish_result = encoder.finish().map_err(|error| error.to_string());
+    let finish_result = encoder
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .expect("encoder is available")
+        .finish()
+        .map_err(|error| error.to_string());
 
     let result = match capture_result {
         Err(error) => Err(error),
@@ -754,10 +776,80 @@ fn run_gdi(monitor: Monitor, flags: CaptureFlags) {
 mod tests {
     use super::*;
 
+    fn mp4_boxes(mut bytes: &[u8]) -> Vec<(&[u8], &[u8])> {
+        let mut boxes = Vec::new();
+        while bytes.len() >= 8 {
+            let length = u32::from_be_bytes(bytes[..4].try_into().unwrap());
+            let (length, header) = match length {
+                0 => (bytes.len(), 8),
+                1 if bytes.len() >= 16 => (
+                    u64::from_be_bytes(bytes[8..16].try_into().unwrap()) as usize,
+                    16,
+                ),
+                length => (length as usize, 8),
+            };
+            assert!(
+                length >= header && length <= bytes.len(),
+                "invalid MP4 box length"
+            );
+            boxes.push((&bytes[4..8], &bytes[header..length]));
+            bytes = &bytes[length..];
+        }
+        boxes
+    }
+
+    fn track_durations(bytes: &[u8]) -> (f64, f64) {
+        let movie = mp4_boxes(bytes)
+            .into_iter()
+            .find(|(kind, _)| *kind == b"moov")
+            .expect("finalized MP4 movie atom")
+            .1;
+        let (mut video, mut audio) = (None, None);
+        for (_, track) in mp4_boxes(movie)
+            .into_iter()
+            .filter(|(kind, _)| *kind == b"trak")
+        {
+            let media = mp4_boxes(track)
+                .into_iter()
+                .find(|(kind, _)| *kind == b"mdia")
+                .unwrap()
+                .1;
+            let children = mp4_boxes(media);
+            let header = children
+                .iter()
+                .find(|(kind, _)| *kind == b"mdhd")
+                .unwrap()
+                .1;
+            let handler = children
+                .iter()
+                .find(|(kind, _)| *kind == b"hdlr")
+                .unwrap()
+                .1;
+            let (scale, duration) = if header[0] == 1 {
+                (
+                    u32::from_be_bytes(header[20..24].try_into().unwrap()),
+                    u64::from_be_bytes(header[24..32].try_into().unwrap()),
+                )
+            } else {
+                (
+                    u32::from_be_bytes(header[12..16].try_into().unwrap()),
+                    u64::from(u32::from_be_bytes(header[16..20].try_into().unwrap())),
+                )
+            };
+            let seconds = duration as f64 / f64::from(scale);
+            match &handler[8..12] {
+                b"vide" => video = Some(seconds),
+                b"soun" => audio = Some(seconds),
+                _ => {}
+            }
+        }
+        (video.expect("video track"), audio.expect("audio track"))
+    }
+
     #[test]
     fn output_reservation_never_truncates_existing_recordings() {
         let directory = tempfile::tempdir().unwrap();
-        let existing = directory.path().join("same_0.mp4");
+        let existing = directory.path().join("same.mp4");
         fs::write(&existing, b"previous recording").unwrap();
         let first = reserve_output(directory.path(), "same").unwrap();
         let second = reserve_output(directory.path(), "same").unwrap();
@@ -835,7 +927,10 @@ mod tests {
                 .expect("recorder start event")
             {
                 RecorderEvent::Started(path) => break path,
-                RecorderEvent::AudioWarning(_) => {}
+                RecorderEvent::AudioWarning(message) => assert_ne!(
+                    message.render(crate::i18n::Language::En),
+                    "Audio dropouts detected"
+                ),
                 RecorderEvent::Failed(error) => panic!("recorder failed to start: {error}"),
                 RecorderEvent::Finished(path) => {
                     panic!("recorder finished before stop: {}", path.display())
@@ -843,7 +938,7 @@ mod tests {
             }
         };
 
-        thread::sleep(Duration::from_millis(750));
+        thread::sleep(Duration::from_secs(2));
         manager.stop();
 
         loop {
@@ -855,10 +950,25 @@ mod tests {
                     assert_eq!(path, started);
                     assert!(path.exists(), "output file was not created");
                     assert!(fs::metadata(&path).expect("output metadata").len() > 0);
-                    let _ = fs::remove_file(path);
+                    let (video, audio) = track_durations(&fs::read(&path).expect("recorded MP4"));
+                    println!(
+                        "MP4 duration: video={video:.3}s, audio={audio:.3}s, delta={:.3}s",
+                        (audio - video).abs()
+                    );
+                    assert!(video > 1.5 && audio > 1.5);
+                    assert!((audio - video).abs() < 0.2, "audio/video duration mismatch");
+                    if std::env::var_os("HSR_KEEP_TEST_VIDEO").is_none() {
+                        let _ = fs::remove_file(path);
+                    } else {
+                        println!("Test recording retained: {}", path.display());
+                    }
                     break;
                 }
-                RecorderEvent::AudioWarning(_) | RecorderEvent::Started(_) => {}
+                RecorderEvent::AudioWarning(message) => assert_ne!(
+                    message.render(crate::i18n::Language::En),
+                    "Audio dropouts detected"
+                ),
+                RecorderEvent::Started(_) => {}
                 RecorderEvent::Failed(error) => panic!("recorder failed to stop: {error}"),
             }
         }

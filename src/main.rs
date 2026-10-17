@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod config;
 mod debug_log;
+mod filename;
 mod hotkeys;
 mod i18n;
 mod recorder;

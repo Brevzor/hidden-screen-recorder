@@ -307,6 +307,7 @@ impl HiddenScreenRecorderApp {
         self.stop_signal = Arc::new(AtomicBool::new(false));
         self.hotkey_controller
             .set_stop_signal(self.stop_signal.clone());
+        self.warning = None;
         self.save_config();
         self.restore_position = ctx.input(|input| input.viewport().outer_rect.map(|rect| rect.min));
         if self.config.hide_window {
@@ -613,10 +614,57 @@ impl HiddenScreenRecorderApp {
         }
     }
 
+    fn render_audio_settings(&mut self, ui: &mut egui::Ui) {
+        let language = self.config.language();
+        let button = ui.button(language.text("Audio settings…", "Настройки звука…"));
+        let open_id = button.id.with("audio_settings_open");
+        let mut open = ui
+            .ctx()
+            .data(|data| data.get_temp::<bool>(open_id).unwrap_or(false));
+        if button.clicked() {
+            open = !open;
+        }
+        // egui has a single memory-managed popup slot. Keep this panel's state
+        // separately so opening the ComboBox cannot replace its parent popup.
+        let close_behavior = if egui::Popup::is_any_open(ui.ctx()) {
+            egui::PopupCloseBehavior::IgnoreClicks
+        } else {
+            egui::PopupCloseBehavior::CloseOnClickOutside
+        };
+        egui::Popup::menu(&button)
+            .open_bool(&mut open)
+            .close_behavior(close_behavior)
+            .show(|ui| {
+                ui.set_min_width(270.0);
+                ui.label(language.text("48 kHz · stereo", "48 кГц · стерео"));
+                ui.horizontal(|ui| {
+                    ui.label(language.text("Buffer", "Буфер"));
+                    ComboBox::from_id_salt("audio_buffer")
+                        .selected_text(format!("{} {}", self.config.audio_buffer_ms, language.text("ms", "мс")))
+                        .show_ui(ui, |ui| {
+                            for (ms, en, ru) in [(100, "100 ms · low latency", "100 мс · малая задержка"), (250, "250 ms · recommended", "250 мс · рекомендуется"), (500, "500 ms · extra buffering", "500 мс · увеличенный буфер")] {
+                                ui.selectable_value(&mut self.config.audio_buffer_ms, ms, language.text(en, ru));
+                            }
+                        })
+                        .response.on_hover_text(language.text("More buffering tolerates scheduling delays without shifting audio in the recording.", "Больший буфер помогает при нагрузке и не сдвигает звук в записи."));
+                });
+                ui.checkbox(
+                    &mut self.config.audio_device_timestamps,
+                    language.text("Use device timestamps", "Метки времени устройства"),
+                )
+                .on_hover_text(language.text(
+                    "Turn off if your audio driver supplies unstable timestamps.",
+                    "Отключите, если драйвер звука передаёт нестабильные метки времени.",
+                ));
+            });
+        ui.ctx().data_mut(|data| data.insert_temp(open_id, open));
+    }
+
     fn render_idle(&mut self, ctx: &egui::Context) {
         let language = self.config.language();
         let idle = matches!(self.state, AppState::Idle);
         egui::TopBottomPanel::bottom("actions")
+            .exact_height(if self.warning.is_some() { 114.0 } else { 82.0 })
             .frame(
                 Frame::new()
                     .fill(BACKGROUND)
@@ -624,8 +672,11 @@ impl HiddenScreenRecorderApp {
             )
             .show(ctx, |ui| {
                 if let Some(warning) = &self.warning {
-                    warning_box(ui, warning.render(language));
-                    ui.add_space(12.0);
+                    let dismiss = warning_box(ui, warning.render(language), language);
+                    if dismiss {
+                        self.warning = None;
+                    }
+                    ui.add_space(6.0);
                 }
                 let (label, color) = if idle {
                     (language.text("Start recording", "Начать запись"), ACCENT)
@@ -687,11 +738,21 @@ impl HiddenScreenRecorderApp {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.add_enabled_ui(idle, |ui| {
-                        let card_height = 368.0;
+                        let card_height = (ui.available_height() - 24.0).clamp(0.0, 368.0);
                         ui.columns(2, |columns| {
                         let ui = &mut columns[0];
                         settings_card(ui, card_height, |ui| {
-                            section_title(ui, language.text("Video & audio", "Видео и звук"));
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.spacing_mut().button_padding.y = 5.0;
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(language.text("Video & audio", "Видео и звук")).size(14.0).strong().color(TEXT));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if self.config.system_audio || self.config.microphone {
+                                        self.render_audio_settings(ui);
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
                             row(ui, language.text("Display", "Экран"), |ui| {
                                 let selected = self.monitors.iter()
                                     .find(|monitor| monitor.index == self.config.monitor_index)
@@ -713,9 +774,9 @@ impl HiddenScreenRecorderApp {
                                 ui.add(Slider::new(&mut self.config.bitrate_mbps, 1..=100).suffix(language.text(" Mbps", " Мбит/с")));
                             });
                             toggle_row(ui, language.text("Record cursor", "Курсор в записи"), &mut self.config.show_cursor);
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
                             ui.separator();
-                            ui.add_space(8.0);
+                            ui.add_space(6.0);
                             toggle_row(ui, language.text("System audio", "Системный звук"), &mut self.config.system_audio);
                             if self.config.system_audio {
                                 row(ui, language.text("System volume", "Громкость системы"), |ui| {
@@ -731,10 +792,13 @@ impl HiddenScreenRecorderApp {
                                         .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)));
                                 });
                             }
+
                         });
                         let ui = &mut columns[1];
                         let invalid_shortcut = self.hotkey_error.is_some();
                         settings_card_state(ui, invalid_shortcut, card_height, |ui| {
+                            ui.spacing_mut().item_spacing.y = 4.0;
+                            ui.spacing_mut().button_padding.y = 5.0;
                             section_title(ui, language.text("App & storage", "Приложение и сохранение"));
                             ui.label(RichText::new(language.text("Duration", "Длительность")).size(13.0).color(MUTED));
                             ui.scope(|ui| {
@@ -759,9 +823,44 @@ impl HiddenScreenRecorderApp {
                                     self.config.output_dir = folder;
                                 }
                             });
-                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.label(language.text("Filename", "Имя файла"));
+                                let width = (ui.available_width() - 44.0).max(80.0);
+                                let now = chrono::Local::now().naive_local();
+                                let example = format!("{}.mp4", crate::filename::render(&self.config.filename_template, now, self.config.monitor_index));
+                                let field = ui.add(egui::TextEdit::singleline(&mut self.config.filename_template)
+                                    .desired_width(width).char_limit(120)
+                                    .hint_text(crate::filename::DEFAULT_TEMPLATE))
+                                    .on_hover_text(format!("{}: {example}", language.text("Example", "Пример")));
+                                let (help_rect, help) = ui.allocate_exact_size(
+                                    Vec2::new(22.0, field.rect.height()), egui::Sense::hover());
+                                ui.painter().text(
+                                    egui::pos2(help_rect.center().x, field.rect.center().y),
+                                    egui::Align2::CENTER_CENTER, "?", egui::FontId::proportional(13.0),
+                                    if help.hovered() { TEXT } else { MUTED });
+                                help.on_hover_ui(|ui| {
+                                        ui.set_max_width(380.0);
+                                        ui.strong(language.text("Filename variables", "Переменные имени файла"));
+                                        egui::Grid::new("filename_variables").num_columns(3).show(ui, |ui| {
+                                            for (tag, format, en, ru) in crate::filename::VARIABLES {
+                                                ui.monospace(tag);
+                                                ui.label(language.text(en, ru));
+                                                ui.monospace(now.format(format).to_string());
+                                                ui.end_row();
+                                            }
+                                            ui.monospace("{monitor}");
+                                            ui.label(language.text("Display number", "Номер экрана"));
+                                            ui.monospace(self.config.monitor_index.to_string());
+                                            ui.end_row();
+                                        });
+                                        ui.separator();
+                                        ui.label(language.text("Local time at recording start. The .mp4 extension is added automatically; duplicate names get _1, _2, … . Unsupported characters become _; unknown tags stay as text.", "Местное время начала записи. Расширение .mp4 добавляется автоматически; при совпадении имён — _1, _2, … . Недопустимые символы заменяются на _; неизвестные теги остаются текстом."));
+                                        ui.label(format!("{}: {example}", language.text("Example", "Пример")));
+                                    });
+                            });
+                            ui.add_space(5.0);
                             ui.separator();
-                            ui.add_space(8.0);
+                            ui.add_space(5.0);
                             toggle_row(ui, language.text("Hide window while recording", "Скрывать окно при записи"), &mut self.config.hide_window)
                                 .on_hover_text(language.text("Hide the window and taskbar icon while recording.", "Скрывает окно и значок на панели задач во время записи."));
                             ui.add_space(3.0);
@@ -1069,15 +1168,44 @@ fn github_button(ui: &mut egui::Ui) {
     }
 }
 
-fn warning_box(ui: &mut egui::Ui, text: &str) {
+fn warning_box(ui: &mut egui::Ui, text: &str, language: Language) -> bool {
     Frame::new()
-        .fill(Color32::from_rgb(51, 34, 27))
-        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(110, 71, 47)))
-        .corner_radius(10.0)
-        .inner_margin(Margin::same(12))
+        .fill(Color32::from_rgb(33, 30, 26))
+        .corner_radius(6.0)
+        .inner_margin(Margin::symmetric(8, 4))
         .show(ui, |ui| {
-            ui.label(RichText::new(format!("⚠  {text}")).color(Color32::from_rgb(255, 188, 129)));
-        });
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.spacing_mut().button_padding = Vec2::ZERO;
+                ui.spacing_mut().interact_size.y = 18.0;
+                ui.label(
+                    RichText::new("⚠")
+                        .size(12.0)
+                        .color(Color32::from_rgb(211, 166, 93)),
+                );
+                let width = (ui.available_width() - 24.0).max(0.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width, 18.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.add(
+                            egui::Label::new(RichText::new(text).size(11.0).color(MUTED))
+                                .truncate(),
+                        )
+                    },
+                )
+                .inner
+                .on_hover_text(text);
+                ui.add_sized(
+                    [18.0, 18.0],
+                    Button::new(RichText::new("×").size(13.0).color(MUTED)).frame(false),
+                )
+                .on_hover_text(language.text("Dismiss", "Закрыть"))
+                .clicked()
+            })
+            .inner
+        })
+        .inner
 }
 
 fn ellipsis(text: &str, maximum_chars: usize) -> String {

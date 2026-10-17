@@ -23,10 +23,11 @@ A native Windows screen recorder built with Rust. Saves H.264 / AAC video to MP4
 ## Features
 
 - **Screen capture** — select a monitor, frame rate, bitrate, and cursor visibility.
-- **Audio** — record system sound and a chosen microphone, with separate volume controls.
+- **Audio** — system sound and a chosen microphone, separate volume controls, 48 kHz stereo. **Audio settings…** offers 100/250/500 ms buffering (250 ms by default) and a device timestamp switch for driver compatibility.
 - **Hotkeys** — `Ctrl+F9` to start, `Ctrl+F10` to stop. Both are customizable.
 - **Hidden window** — optionally hide the window and taskbar icon while recording.
 - **Auto-stop** — set a time limit or record without one.
+- **Filenames** — custom templates such as `Game_{d}_{t}`; hover `?` for all variables. Existing recordings are never overwritten.
 - **EN / RU** — follows the Windows display language; switch beside the GitHub icon. Your choice is saved. Other system languages default to English.
 
 ## Download & run
@@ -57,8 +58,8 @@ Output: `target\release\hidden-screen-recorder.exe`.
 | :--- | :--- |
 | [eframe / egui](https://docs.rs/eframe/0.33) | Native UI and OpenGL rendering |
 | [windows-capture](https://docs.rs/windows-capture/2.0.1) | Screen capture and Media Foundation encoding |
-| [wasapi](https://docs.rs/wasapi/0.25) | System audio loopback and microphone input |
-| [windows](https://docs.rs/windows/0.62), [raw-window-handle](https://docs.rs/raw-window-handle/0.6) | Win32 APIs and window handles |
+| [wasapi](https://docs.rs/wasapi/0.25) | Audio device enumeration and formats |
+| [windows](https://docs.rs/windows/0.62), [raw-window-handle](https://docs.rs/raw-window-handle/0.6) | Native WASAPI capture, Win32 APIs, and window handles |
 | [serde](https://docs.rs/serde/1), [serde_json](https://docs.rs/serde_json/1) | Settings serialization |
 | [rfd](https://docs.rs/rfd/0.15), [directories](https://docs.rs/directories/6) | Folder picker and system paths |
 | [chrono](https://docs.rs/chrono/0.4), [tempfile](https://docs.rs/tempfile/3) | Timestamps and atomic settings saves |

@@ -27,8 +27,11 @@ pub struct AppConfig {
     pub microphone_device: Option<String>,
     pub system_volume: f32,
     pub microphone_volume: f32,
+    pub audio_buffer_ms: u32,
+    pub audio_device_timestamps: bool,
     pub duration_minutes: u32,
     pub output_dir: PathBuf,
+    pub filename_template: String,
     pub logging_enabled: bool,
     pub hide_window: bool,
     pub shortcuts: Shortcuts,
@@ -54,8 +57,11 @@ impl Default for AppConfig {
             microphone_device: None,
             system_volume: 1.0,
             microphone_volume: 1.0,
+            audio_buffer_ms: 250,
+            audio_device_timestamps: true,
             duration_minutes: 0,
             output_dir,
+            filename_template: crate::filename::DEFAULT_TEMPLATE.to_owned(),
             logging_enabled: false,
             hide_window: true,
             shortcuts: Shortcuts::default(),
@@ -124,6 +130,7 @@ impl AppConfig {
         config.bitrate_mbps = config.bitrate_mbps.clamp(1, 100);
         config.system_volume = config.system_volume.clamp(0.0, 1.5);
         config.microphone_volume = config.microphone_volume.clamp(0.0, 1.5);
+        config.audio_buffer_ms = config.audio_buffer_ms.clamp(100, 1000);
         config.duration_minutes = config.duration_minutes.min(24 * 60);
         if !config.shortcuts.is_valid() {
             config.shortcuts = Shortcuts::default();
@@ -255,6 +262,9 @@ mod tests {
         let config = AppConfig {
             logging_enabled: true,
             hide_window: false,
+            audio_buffer_ms: 500,
+            audio_device_timestamps: false,
+            filename_template: "Game_{d}_{t}".to_owned(),
             shortcuts: Shortcuts {
                 start: crate::hotkeys::Shortcut {
                     key: 0x52,
@@ -270,6 +280,9 @@ mod tests {
         let restored: AppConfig = serde_json::from_str(&json).unwrap();
         assert!(restored.logging_enabled);
         assert!(!restored.hide_window);
+        assert_eq!(restored.audio_buffer_ms, 500);
+        assert!(!restored.audio_device_timestamps);
+        assert_eq!(restored.filename_template, "Game_{d}_{t}");
         assert_eq!(restored.shortcuts, config.shortcuts);
     }
 
