@@ -1,0 +1,27 @@
+name: Feature request / Предложение
+description: Suggest an improvement. English or Russian is welcome.
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: Please check existing suggestions first. Можно писать по-русски.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case / Задача
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed behavior / Предложение
+      description: Describe how the feature would work for a user.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or examples / Альтернативы и примеры
+      description: Optional mockups, links, or workarounds.

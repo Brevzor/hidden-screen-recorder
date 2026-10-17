@@ -1,0 +1,53 @@
+name: Bug report / Ошибка
+description: Report a recording, audio, or interface problem. English or Russian is welcome.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. English and Russian are both welcome.
+        Сначала проверьте существующие issues. Можно писать на русском или английском.
+  - type: input
+    id: version
+    attributes:
+      label: App version / Версия приложения
+      description: Release tag or commit; mention if you built it yourself.
+      placeholder: "v0.1.0 or commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version / Версия Windows
+      placeholder: "Windows 11 24H2, build 26100"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce / Как повторить
+      placeholder: |
+        1. Open…
+        2. Select…
+        3. Start recording…
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Actual and expected result / Что произошло и что ожидалось
+    validations:
+      required: true
+  - type: textarea
+    id: setup
+    attributes:
+      label: Relevant settings / Настройки
+      description: GPU, resolution/FPS, audio devices, buffer size, and device timestamps if relevant.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or logs / Скриншоты или логи
+      description: |
+        Optional. Logs can be enabled in the app and appear next to the exe. Remove personal paths, private recordings, and other sensitive details before attaching.
+        Необязательно. Логи включаются в приложении и сохраняются рядом с exe. Удалите личные пути и приватные данные перед отправкой.

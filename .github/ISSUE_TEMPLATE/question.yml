@@ -1,0 +1,12 @@
+name: Question / Вопрос
+description: Ask about setup, recording, or contributing. English or Russian is welcome.
+title: "[Question] "
+labels: [question]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question / Ваш вопрос
+      description: What are you trying to do? Mention your app and Windows versions if relevant.
+    validations:
+      required: true

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation / Документация
+    url: https://github.com/Brevzor/hidden-screen-recorder#readme
+    about: Downloads, hotkeys, settings, and build instructions.
