@@ -18,6 +18,10 @@ tempfile = "3"
 wasapi = "0.25"
 windows-capture = "2.0.1"
 
+[build-dependencies]
+resvg = { version = "0.48", default-features = false }
+winresource = "0.1"
+
 [dependencies.windows]
 version = "0.62"
 features = [

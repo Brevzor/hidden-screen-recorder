@@ -62,6 +62,7 @@ cargo build --locked --release
 | [serde](https://docs.rs/serde/1), [serde_json](https://docs.rs/serde_json/1) | Сериализация настроек |
 | [rfd](https://docs.rs/rfd/0.15), [directories](https://docs.rs/directories/6) | Выбор папки и системные пути |
 | [chrono](https://docs.rs/chrono/0.4), [tempfile](https://docs.rs/tempfile/3) | Временные метки и атомарное сохранение настроек |
+| [resvg](https://docs.rs/resvg/0.48), [winresource](https://docs.rs/winresource/0.1) | Преобразование SVG и иконки Windows при сборке |
 
 Версии: [Cargo.toml](Cargo.toml) · Зафиксированные зависимости: [Cargo.lock](Cargo.lock).
 

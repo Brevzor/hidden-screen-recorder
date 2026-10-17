@@ -62,6 +62,7 @@ Output: `target\release\hidden-screen-recorder.exe`.
 | [serde](https://docs.rs/serde/1), [serde_json](https://docs.rs/serde_json/1) | Settings serialization |
 | [rfd](https://docs.rs/rfd/0.15), [directories](https://docs.rs/directories/6) | Folder picker and system paths |
 | [chrono](https://docs.rs/chrono/0.4), [tempfile](https://docs.rs/tempfile/3) | Timestamps and atomic settings saves |
+| [resvg](https://docs.rs/resvg/0.48), [winresource](https://docs.rs/winresource/0.1) | Build-time SVG rendering and Windows icons |
 
 Versions: [Cargo.toml](Cargo.toml) · Locked dependencies: [Cargo.lock](Cargo.lock).
 
