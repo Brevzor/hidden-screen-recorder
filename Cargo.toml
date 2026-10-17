@@ -1,0 +1,38 @@
+[package]
+name = "hidden-screen-recorder"
+version = "0.1.0"
+edition = "2024"
+description = "Native Windows screen recorder with WASAPI loopback audio"
+license = "MIT"
+repository = "https://github.com/brevzor/hidden-screen-recorder"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+directories = "6"
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"] }
+rfd = "0.15"
+raw-window-handle = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+wasapi = "0.25"
+windows-capture = "2.0.1"
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
