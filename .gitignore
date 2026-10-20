@@ -1,4 +1,5 @@
 /target/
+/dist/
 /recordings/
 *.mp4
 *.tmp

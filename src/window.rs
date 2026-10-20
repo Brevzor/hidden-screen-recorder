@@ -10,8 +10,35 @@ use windows::Win32::UI::Shell::{ITaskbarList, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetWindowLongPtrW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE,
     SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowDisplayAffinity, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    SetWindowPos, ShowWindow, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
+
+pub fn app_icon(recording: bool) -> eframe::egui::IconData {
+    let mut icon = eframe::icon_data::from_png_bytes(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/app-icon.png"
+    )))
+    .expect("generated application icon");
+    if recording {
+        let size = icon.width.min(icon.height) as f32;
+        let center = size * 0.76;
+        for y in 0..icon.height {
+            for x in 0..icon.width {
+                let distance = ((x as f32 - center).powi(2) + (y as f32 - center).powi(2)).sqrt();
+                if distance <= size * 0.23 {
+                    let color = if distance <= size * 0.18 {
+                        [239, 52, 64, 255]
+                    } else {
+                        [255, 255, 255, 255]
+                    };
+                    let offset = ((y * icon.width + x) * 4) as usize;
+                    icon.rgba[offset..offset + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+    icon
+}
 
 pub fn native_handle(cc: &eframe::CreationContext<'_>) -> Result<HWND, Message> {
     match cc
@@ -27,11 +54,21 @@ pub fn native_handle(cc: &eframe::CreationContext<'_>) -> Result<HWND, Message> 
     }
 }
 
-pub fn exclude_from_capture(window: HWND) -> Result<(), Message> {
-    unsafe { SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE) }.map_err(|error| {
+pub fn set_capture_excluded(window: HWND, excluded: bool) -> Result<(), Message> {
+    unsafe {
+        SetWindowDisplayAffinity(
+            window,
+            if excluded {
+                WDA_EXCLUDEFROMCAPTURE
+            } else {
+                WDA_NONE
+            },
+        )
+    }
+    .map_err(|error| {
         msg!(
-            "Could not exclude the window from capture: {error}",
-            "Не удалось исключить окно из захвата: {error}"
+            "Could not update window capture visibility: {error}",
+            "Не удалось изменить видимость окна при захвате: {error}"
         )
     })
 }

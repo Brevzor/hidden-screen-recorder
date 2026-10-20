@@ -13,6 +13,14 @@ use crate::{
     msg,
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseSuppressionMethod {
+    Speex,
+    #[default]
+    Rnnoise,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -27,6 +35,12 @@ pub struct AppConfig {
     pub microphone_device: Option<String>,
     pub system_volume: f32,
     pub microphone_volume: f32,
+    pub microphone_threshold_db: Option<f32>,
+    pub microphone_noise_suppression: bool,
+    pub microphone_noise_method: NoiseSuppressionMethod,
+    pub microphone_suppression_db: i32,
+    #[serde(default)]
+    pub microphone_filter_defaults_version: u8,
     pub audio_buffer_ms: u32,
     pub audio_device_timestamps: bool,
     pub duration_minutes: u32,
@@ -57,6 +71,11 @@ impl Default for AppConfig {
             microphone_device: None,
             system_volume: 1.0,
             microphone_volume: 1.0,
+            microphone_threshold_db: None,
+            microphone_noise_suppression: true,
+            microphone_noise_method: NoiseSuppressionMethod::Rnnoise,
+            microphone_suppression_db: -30,
+            microphone_filter_defaults_version: 1,
             audio_buffer_ms: 250,
             audio_device_timestamps: true,
             duration_minutes: 0,
@@ -124,12 +143,24 @@ impl AppConfig {
                 ),
             }
         })?;
+        // Apply the enabled RNNoise default once to existing installations.
+        // Subsequent changes made by the user are saved and respected.
+        if config.microphone_filter_defaults_version == 0 {
+            config.microphone_noise_suppression = true;
+            config.microphone_noise_method = NoiseSuppressionMethod::Rnnoise;
+            config.microphone_filter_defaults_version = 1;
+        }
         let before = serde_json::to_string(&config).map_err(|error| error.to_string())?;
         // Preserve documented advanced values and expose the same ranges in UI.
         config.fps = config.fps.clamp(1, 240);
         config.bitrate_mbps = config.bitrate_mbps.clamp(1, 100);
         config.system_volume = config.system_volume.clamp(0.0, 1.5);
         config.microphone_volume = config.microphone_volume.clamp(0.0, 1.5);
+        config.microphone_suppression_db = config.microphone_suppression_db.clamp(-60, 0);
+        config.microphone_threshold_db = config
+            .microphone_threshold_db
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(-60.0, -10.0));
         config.audio_buffer_ms = config.audio_buffer_ms.clamp(100, 1000);
         config.duration_minutes = config.duration_minutes.min(24 * 60);
         if !config.shortcuts.is_valid() {
@@ -181,6 +212,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rnnoise_is_enabled_by_default_and_migrates_existing_settings_once() {
+        let defaults = AppConfig::default();
+        assert!(defaults.microphone_noise_suppression);
+        assert_eq!(
+            defaults.microphone_noise_method,
+            NoiseSuppressionMethod::Rnnoise
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(&path, r#"{"microphone_noise_suppression":false,"microphone_noise_method":"speex","microphone_volume":0.8}"#).unwrap();
+        let (mut config, warning) = AppConfig::load_from(&path).unwrap();
+        assert!(warning.is_none());
+        assert!(config.microphone_noise_suppression);
+        assert_eq!(
+            config.microphone_noise_method,
+            NoiseSuppressionMethod::Rnnoise
+        );
+        assert_eq!(config.microphone_volume, 0.8);
+        config.microphone_noise_suppression = false;
+        config.microphone_noise_method = NoiseSuppressionMethod::Speex;
+        config.save_to(&path).unwrap();
+        let (loaded, warning) = AppConfig::load_from(&path).unwrap();
+        assert!(warning.is_none());
+        assert!(
+            !loaded.microphone_noise_suppression,
+            "an explicit choice after migration must persist"
+        );
+        assert_eq!(
+            loaded.microphone_noise_method,
+            NoiseSuppressionMethod::Speex
+        );
+    }
+
+    #[test]
     fn atomic_save_replaces_existing_valid_settings() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
@@ -225,10 +290,11 @@ mod tests {
     fn invalid_values_are_corrected_with_a_warning() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("settings.json");
-        fs::write(&path, r#"{"fps":0,"bitrate_mbps":300,"duration_minutes":99999,"shortcuts":{"stop":{"key":120,"ctrl":true,"alt":false,"shift":false}}}"#).unwrap();
+        fs::write(&path, r#"{"fps":0,"bitrate_mbps":300,"microphone_threshold_db":-100,"duration_minutes":99999,"shortcuts":{"stop":{"key":120,"ctrl":true,"alt":false,"shift":false}}}"#).unwrap();
         let (loaded, warning) = AppConfig::load_from(&path).unwrap();
         assert_eq!(loaded.fps, 1);
         assert_eq!(loaded.bitrate_mbps, 100);
+        assert_eq!(loaded.microphone_threshold_db, Some(-60.0));
         assert_eq!(loaded.duration_minutes, 1440);
         assert!(loaded.shortcuts.is_valid());
         assert!(warning.is_some());
@@ -250,6 +316,13 @@ mod tests {
         let config: AppConfig = serde_json::from_str(r#"{"fps":60,"microphone":true}"#).unwrap();
         assert_eq!(config.fps, 60);
         assert!(config.microphone);
+        assert_eq!(config.microphone_threshold_db, None);
+        assert!(config.microphone_noise_suppression);
+        assert_eq!(
+            config.microphone_noise_method,
+            NoiseSuppressionMethod::Rnnoise
+        );
+        assert_eq!(config.microphone_suppression_db, -30);
         assert!(config.hide_window);
         assert!(!config.logging_enabled);
         assert_eq!(config.shortcuts, Shortcuts::default());
@@ -264,6 +337,10 @@ mod tests {
             hide_window: false,
             audio_buffer_ms: 500,
             audio_device_timestamps: false,
+            microphone_threshold_db: Some(-38.0),
+            microphone_noise_suppression: true,
+            microphone_noise_method: NoiseSuppressionMethod::Rnnoise,
+            microphone_suppression_db: -42,
             filename_template: "Game_{d}_{t}".to_owned(),
             shortcuts: Shortcuts {
                 start: crate::hotkeys::Shortcut {
@@ -282,6 +359,13 @@ mod tests {
         assert!(!restored.hide_window);
         assert_eq!(restored.audio_buffer_ms, 500);
         assert!(!restored.audio_device_timestamps);
+        assert_eq!(restored.microphone_threshold_db, Some(-38.0));
+        assert!(restored.microphone_noise_suppression);
+        assert_eq!(
+            restored.microphone_noise_method,
+            NoiseSuppressionMethod::Rnnoise
+        );
+        assert_eq!(restored.microphone_suppression_db, -42);
         assert_eq!(restored.filename_template, "Game_{d}_{t}");
         assert_eq!(restored.shortcuts, config.shortcuts);
     }

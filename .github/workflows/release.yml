@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check release version
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object name -eq 'hidden-screen-recorder').version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw 'Tag and package versions differ' }
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - name: Package Windows build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target/release/hidden-screen-recorder.exe dist/
+          Copy-Item LICENSE,THIRD_PARTY_NOTICES.txt dist/
+          $archive = "hidden-screen-recorder-$env:GITHUB_REF_NAME-windows-x64.zip"
+          Compress-Archive -Path dist/hidden-screen-recorder.exe,dist/LICENSE,dist/THIRD_PARTY_NOTICES.txt -DestinationPath "dist/$archive"
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "docs/releases/$env:GITHUB_REF_NAME.md"
+          if (!(Test-Path -LiteralPath $notes)) { throw "Release notes not found: $notes" }
+          $archive = "dist/hidden-screen-recorder-$env:GITHUB_REF_NAME-windows-x64.zip"
+          gh release create "$env:GITHUB_REF_NAME" dist/hidden-screen-recorder.exe "$archive" --verify-tag --title "$env:GITHUB_REF_NAME" --notes-file "$notes" --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

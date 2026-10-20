@@ -900,6 +900,22 @@ mod tests {
     #[test]
     #[ignore = "captures the live desktop for the recorder integration test"]
     fn live_capture_starts_and_stops_from_atomic_signal() {
+        live_capture(true, false);
+    }
+
+    #[test]
+    #[ignore = "captures the live desktop to verify the silent AAC track"]
+    fn live_capture_without_audio_has_valid_tracks() {
+        live_capture(false, false);
+    }
+
+    #[test]
+    #[ignore = "captures the live desktop and microphone with Speex enabled"]
+    fn live_capture_with_microphone_noise_suppression() {
+        live_capture(true, true);
+    }
+
+    fn live_capture(system_audio: bool, microphone: bool) {
         let output_dir = std::env::current_dir()
             .expect("working directory")
             .join("target")
@@ -912,8 +928,9 @@ mod tests {
         let monitor_index = monitor.index().expect("monitor index");
         let config = AppConfig {
             monitor_index,
-            system_audio: true,
-            microphone: false,
+            system_audio,
+            microphone,
+            microphone_noise_suppression: microphone,
             output_dir,
             ..AppConfig::default()
         };
@@ -927,10 +944,13 @@ mod tests {
                 .expect("recorder start event")
             {
                 RecorderEvent::Started(path) => break path,
-                RecorderEvent::AudioWarning(message) => assert_ne!(
-                    message.render(crate::i18n::Language::En),
-                    "Audio dropouts detected"
-                ),
+                RecorderEvent::AudioWarning(message) => {
+                    assert!(!microphone, "microphone capture warning: {message}");
+                    assert_ne!(
+                        message.render(crate::i18n::Language::En),
+                        "Audio dropouts detected"
+                    );
+                }
                 RecorderEvent::Failed(error) => panic!("recorder failed to start: {error}"),
                 RecorderEvent::Finished(path) => {
                     panic!("recorder finished before stop: {}", path.display())
@@ -964,10 +984,13 @@ mod tests {
                     }
                     break;
                 }
-                RecorderEvent::AudioWarning(message) => assert_ne!(
-                    message.render(crate::i18n::Language::En),
-                    "Audio dropouts detected"
-                ),
+                RecorderEvent::AudioWarning(message) => {
+                    assert!(!microphone, "microphone capture warning: {message}");
+                    assert_ne!(
+                        message.render(crate::i18n::Language::En),
+                        "Audio dropouts detected"
+                    );
+                }
                 RecorderEvent::Started(_) => {}
                 RecorderEvent::Failed(error) => panic!("recorder failed to stop: {error}"),
             }

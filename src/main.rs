@@ -8,6 +8,7 @@ mod filename;
 mod hotkeys;
 mod i18n;
 mod recorder;
+mod speex;
 mod window;
 
 fn main() -> eframe::Result<()> {
@@ -22,13 +23,7 @@ fn main() -> eframe::Result<()> {
         .with_inner_size(app::WINDOW_SIZE)
         .with_min_inner_size(app::MIN_WINDOW_SIZE)
         .with_title(app::WINDOW_TITLE)
-        .with_icon(
-            eframe::icon_data::from_png_bytes(include_bytes!(concat!(
-                env!("OUT_DIR"),
-                "/app-icon.png"
-            )))
-            .expect("generated application icon"),
-        )
+        .with_icon(window::app_icon(false))
         .with_resizable(true);
 
     eframe::run_native(

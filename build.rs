@@ -3,8 +3,28 @@ use std::{env, fs, path::PathBuf};
 use resvg::{tiny_skia, usvg};
 
 fn main() {
+    println!("cargo:rerun-if-changed=vendor/speexdsp");
+    let mut speex = cc::Build::new();
+    speex
+        .include("vendor/speexdsp/include")
+        .include("vendor/speexdsp/libspeexdsp")
+        .define("FLOATING_POINT", None)
+        .define("USE_SMALLFT", None)
+        .define("EXPORT", "")
+        .warnings(false);
+    for source in [
+        "preprocess.c",
+        "mdf.c",
+        "fftwrap.c",
+        "filterbank.c",
+        "smallft.c",
+    ] {
+        speex.file(format!("vendor/speexdsp/libspeexdsp/{source}"));
+    }
+    speex.compile("hsr_speexdsp");
     println!("cargo:rerun-if-changed=docs/images/logo.svg");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=THIRD_PARTY_NOTICES.txt");
 
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
     let svg = fs::read("docs/images/logo.svg").expect("read application logo");
@@ -53,6 +73,13 @@ fn main() {
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         winresource::WindowsResource::new()
             .set_icon(icon_path.to_str().expect("UTF-8 icon path"))
+            .append_rc_content(&format!(
+                "200 RCDATA \"{}\"",
+                PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
+                    .join("THIRD_PARTY_NOTICES.txt")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            ))
             .compile()
             .expect("embed application icon with Windows SDK resource compiler");
     }

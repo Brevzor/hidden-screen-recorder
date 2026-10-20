@@ -63,6 +63,23 @@ mod state_tests {
     use super::AppState;
 
     #[test]
+    fn meter_formats_silence_and_filters_tiny_or_invalid_values() {
+        for peak in [
+            0.0,
+            f32::from_bits(1),
+            0.000_001,
+            f32::NAN,
+            f32::INFINITY,
+            -1.0,
+        ] {
+            assert_eq!(super::audio_level_text(peak), "−∞ dBFS");
+        }
+        assert_eq!(super::audio_level_text(0.001), "-60.0 dBFS");
+        assert_eq!(super::audio_level_text(0.5), "-6.0 dBFS");
+        assert_eq!(super::audio_level_text(1.0), "0.0 dBFS");
+    }
+
+    #[test]
     fn late_started_cannot_cancel_stopping() {
         let mut state = AppState::Starting;
         state.capture_started();
@@ -102,6 +119,10 @@ pub struct HiddenScreenRecorderApp {
     hotkey_controller: Arc<HotkeyController>,
     editing_hotkey: Option<HotkeyTarget>,
     hotkey_error: Option<Message>,
+    capture_excluded: bool,
+    recording_icon: bool,
+    audio_preview: Option<audio::AudioPreview>,
+    audio_levels: [f32; 2],
 }
 
 impl HiddenScreenRecorderApp {
@@ -141,7 +162,7 @@ impl HiddenScreenRecorderApp {
         let (window, window_warning) = match crate::window::native_handle(cc) {
             Ok(window) => (
                 Some(window),
-                crate::window::exclude_from_capture(window).err(),
+                crate::window::set_capture_excluded(window, config.hide_window).err(),
             ),
             Err(error) => (None, Some(error)),
         };
@@ -150,6 +171,7 @@ impl HiddenScreenRecorderApp {
                 .into_iter()
                 .flatten(),
         );
+        let capture_excluded = config.hide_window;
         let mut app = Self {
             config,
             monitors,
@@ -170,6 +192,10 @@ impl HiddenScreenRecorderApp {
             hotkey_controller,
             editing_hotkey: None,
             hotkey_error: None,
+            capture_excluded,
+            recording_icon: false,
+            audio_preview: None,
+            audio_levels: [0.0; 2],
         };
         app.refresh_microphones(&cc.egui_ctx);
         app
@@ -194,6 +220,52 @@ impl HiddenScreenRecorderApp {
                     "Не удалось получить список микрофонов: {error}"
                 ))
             }
+        }
+    }
+
+    fn update_window_and_audio(&mut self, ctx: &egui::Context) {
+        if self.capture_excluded != self.config.hide_window {
+            self.capture_excluded = self.config.hide_window;
+            if let Some(window) = self.window
+                && let Err(error) =
+                    crate::window::set_capture_excluded(window, self.capture_excluded)
+            {
+                self.warning = Some(error);
+            }
+        }
+        let recording = matches!(self.state, AppState::Recording | AppState::Stopping);
+        if recording != self.recording_icon {
+            self.recording_icon = recording;
+            ctx.send_viewport_cmd(ViewportCommand::Icon(Some(Arc::new(
+                crate::window::app_icon(recording),
+            ))));
+        }
+        if self
+            .audio_preview
+            .as_ref()
+            .is_some_and(|preview| !preview.matches(&self.config))
+        {
+            self.audio_preview = None;
+        }
+        if self.audio_preview.is_none() {
+            match audio::AudioPreview::start(&self.config) {
+                Ok(preview) => self.audio_preview = Some(preview),
+                Err(error) => self.warning = Some(error),
+            }
+        }
+        if let Some(preview) = &self.audio_preview
+            && let Err(error) = preview.update(&self.config)
+        {
+            self.warning = Some(error);
+        }
+        self.audio_levels = self
+            .audio_preview
+            .as_ref()
+            .map_or([0.0; 2], audio::AudioPreview::levels);
+        if let Some(preview) = &self.audio_preview
+            && let Some(warning) = preview.warning()
+        {
+            self.warning = Some(warning);
         }
     }
 
@@ -249,7 +321,7 @@ impl HiddenScreenRecorderApp {
         row(ui, language.text("Device", "Устройство"), |ui| {
             ComboBox::from_id_salt("microphone_device")
                 .selected_text(ellipsis(&selected, 30))
-                .width(230.0)
+                .width(ui.available_width())
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut self.config.microphone_device,
@@ -530,7 +602,7 @@ impl HiddenScreenRecorderApp {
                         .stroke(Stroke::new(1.0_f32, ERROR));
                 }
                 let response = ui
-                    .add_sized([200.0, 28.0], button)
+                    .add_sized([ui.available_width(), CONTROL_HEIGHT], button)
                     .on_hover_text(language.text(
                         "Click to change this shortcut",
                         "Нажмите, чтобы изменить сочетание клавиш",
@@ -660,6 +732,82 @@ impl HiddenScreenRecorderApp {
         ui.ctx().data_mut(|data| data.insert_temp(open_id, open));
     }
 
+    fn render_microphone_filters(&mut self, ui: &mut egui::Ui) {
+        let language = self.config.language();
+        let button = ui.add_sized(
+            [VALUE_WIDTH, CONTROL_HEIGHT],
+            Button::new(language.text("Filters", "Фильтры")).selected(
+                self.config.microphone_noise_suppression
+                    || self.config.microphone_threshold_db.is_some(),
+            ),
+        );
+        egui::Popup::menu(&button)
+            .align(egui::emath::RectAlign::TOP_START)
+            .align_alternatives(&[])
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(245.0);
+                ui.set_max_width(280.0);
+                ui.checkbox(
+                    &mut self.config.microphone_noise_suppression,
+                    language.text("Noise suppression", "Шумоподавление"),
+                );
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut self.config.microphone_noise_method,
+                        crate::config::NoiseSuppressionMethod::Rnnoise,
+                        "RNNoise",
+                    );
+                    ui.selectable_value(
+                        &mut self.config.microphone_noise_method,
+                        crate::config::NoiseSuppressionMethod::Speex,
+                        "Speex",
+                    );
+                });
+                if self.config.microphone_noise_method
+                    == crate::config::NoiseSuppressionMethod::Speex
+                {
+                    ui.label(language.text("Suppression level", "Сила подавления"));
+                    ui.add_enabled(
+                        self.config.microphone_noise_suppression,
+                        Slider::new(&mut self.config.microphone_suppression_db, -60..=0)
+                            .suffix(" dB"),
+                    )
+                    .on_hover_text(language.text(
+                        "Lower values increase suppression.",
+                        "Чем ниже значение, тем сильнее подавление.",
+                    ));
+                }
+                ui.separator();
+                let mut enabled = self.config.microphone_threshold_db.is_some();
+                if ui
+                    .checkbox(
+                        &mut enabled,
+                        language.text("Microphone threshold", "Нижний порог микрофона"),
+                    )
+                    .changed()
+                {
+                    self.config.microphone_threshold_db = enabled.then_some(-40.0);
+                }
+                let mut db = self.config.microphone_threshold_db.unwrap_or(-40.0);
+                if ui
+                    .add_enabled(
+                        enabled,
+                        Slider::new(&mut db, -60.0..=-10.0)
+                            .suffix(" dBFS")
+                            .integer(),
+                    )
+                    .changed()
+                {
+                    self.config.microphone_threshold_db = Some(db);
+                }
+                let peak = self.audio_levels[1] * self.config.microphone_volume;
+                let level = audio_level_text(peak);
+                ui.label(format!("{}: {level}", language.text("Output", "Выход")));
+            });
+        button.on_hover_text(language.text("Microphone filters", "Фильтры микрофона"));
+    }
+
     fn render_idle(&mut self, ctx: &egui::Context) {
         let language = self.config.language();
         let idle = matches!(self.state, AppState::Idle);
@@ -757,7 +905,7 @@ impl HiddenScreenRecorderApp {
                                 let selected = self.monitors.iter()
                                     .find(|monitor| monitor.index == self.config.monitor_index)
                                     .map(|monitor| monitor.label.as_str()).unwrap_or(language.text("Primary display", "Основной экран"));
-                                ComboBox::from_id_salt("monitor").selected_text(selected).width(230.0)
+                                ComboBox::from_id_salt("monitor").selected_text(ellipsis(selected, 30)).width(ui.available_width())
                                     .show_ui(ui, |ui| {
                                         for monitor in &self.monitors {
                                             ui.selectable_value(&mut self.config.monitor_index, monitor.index, &monitor.label);
@@ -765,13 +913,18 @@ impl HiddenScreenRecorderApp {
                                     });
                             });
                             row(ui, language.text("Frame rate", "Частота кадров"), |ui| {
-                                for fps in [15, 30, 60] {
-                                    ui.selectable_value(&mut self.config.fps, fps, format!("{fps} FPS"));
-                                }
-                                ui.add(egui::DragValue::new(&mut self.config.fps).range(1..=240).suffix(" FPS"));
+                                ComboBox::from_id_salt("frame_rate").width(ui.available_width())
+                                    .selected_text(format!("{} FPS", self.config.fps))
+                                    .show_ui(ui, |ui| {
+                                        for fps in [15, 24, 30, 60, 120, 144, 240] {
+                                            ui.selectable_value(&mut self.config.fps, fps, format!("{fps} FPS"));
+                                        }
+                                        ui.separator();
+                                        ui.add(egui::DragValue::new(&mut self.config.fps).range(1..=240).suffix(" FPS"));
+                                    });
                             });
-                            row(ui, language.text("Quality", "Качество"), |ui| {
-                                ui.add(Slider::new(&mut self.config.bitrate_mbps, 1..=100).suffix(language.text(" Mbps", " Мбит/с")));
+                            row(ui, language.text("Bitrate", "Битрейт"), |ui| {
+                                integer_slider(ui, &mut self.config.bitrate_mbps, 1..=100, language.text(" Mbps", " Мбит/с"), false);
                             });
                             toggle_row(ui, language.text("Record cursor", "Курсор в записи"), &mut self.config.show_cursor);
                             ui.add_space(6.0);
@@ -779,17 +932,22 @@ impl HiddenScreenRecorderApp {
                             ui.add_space(6.0);
                             toggle_row(ui, language.text("System audio", "Системный звук"), &mut self.config.system_audio);
                             if self.config.system_audio {
-                                row(ui, language.text("System volume", "Громкость системы"), |ui| {
-                                    ui.add(Slider::new(&mut self.config.system_volume, 0.0..=1.5)
-                                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)));
+                                row(ui, language.text("Volume", "Громкость"), |ui| {
+                                    volume_slider(ui, &mut self.config.system_volume, self.audio_levels[0], language, None);
                                 });
                             }
-                            toggle_row(ui, language.text("Microphone", "Микрофон"), &mut self.config.microphone);
+                            row(ui, language.text("Microphone", "Микрофон"), |ui| {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    toggle(ui, &mut self.config.microphone, "microphone_enabled");
+                                    if self.config.microphone {
+                                        self.render_microphone_filters(ui);
+                                    }
+                                });
+                            });
                             if self.config.microphone {
                                 self.render_microphone_selector(ui, ctx);
-                                row(ui, language.text("Microphone volume", "Громкость микрофона"), |ui| {
-                                    ui.add(Slider::new(&mut self.config.microphone_volume, 0.0..=1.5)
-                                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)));
+                                row(ui, language.text("Volume", "Громкость"), |ui| {
+                                    volume_slider(ui, &mut self.config.microphone_volume, self.audio_levels[1], language, self.config.microphone_threshold_db);
                                 });
                             }
 
@@ -800,40 +958,32 @@ impl HiddenScreenRecorderApp {
                             ui.spacing_mut().item_spacing.y = 4.0;
                             ui.spacing_mut().button_padding.y = 5.0;
                             section_title(ui, language.text("App & storage", "Приложение и сохранение"));
-                            ui.label(RichText::new(language.text("Duration", "Длительность")).size(13.0).color(MUTED));
-                            ui.scope(|ui| {
-                                let value_width = 140.0;
-                                ui.spacing_mut().slider_width = (ui.available_width() - value_width - ui.spacing().item_spacing.x).max(100.0);
-                                ui.spacing_mut().interact_size = Vec2::new(value_width, 28.0);
-                                ui.add(Slider::new(&mut self.config.duration_minutes, 0..=1440)
-                                    .custom_formatter(|value, _| {
-                                        if value < 0.5 { language.text("Unlimited", "Без ограничения").into() }
-                                        else { format!("{} {}", value.round() as u32, language.text("min", "мин")) }
-                                    }));
+                            row(ui, language.text("Duration", "Длительность"), |ui| {
+                                integer_slider(ui, &mut self.config.duration_minutes, 0..=1440, language.text(" min", " мин"), true);
                             });
-                            ui.add_space(10.0);
-                            ui.label(RichText::new(language.text("Save location", "Хранилище")).size(13.0).color(MUTED));
-                            ui.horizontal(|ui| {
+                            row(ui, language.text("Save location", "Папка записи"), |ui| {
                                 let path = self.config.output_dir.to_string_lossy();
-                                ui.label(RichText::new(ellipsis(&path, 34)).size(12.0).color(MUTED))
+                                let path_width = (ui.available_width() - VALUE_WIDTH - ui.spacing().item_spacing.x).max(50.0);
+                                ui.add_sized([path_width, CONTROL_HEIGHT], egui::Label::new(RichText::new(path.as_ref()).size(12.0).color(MUTED)).truncate().halign(Align::Min))
                                     .on_hover_text(path.as_ref());
-                                if ui.button(language.text("Browse…", "Выбрать…")).clicked()
+                                if ui.add_sized([VALUE_WIDTH, CONTROL_HEIGHT], Button::new(language.text("Browse", "Выбрать"))).clicked()
                                     && let Some(folder) = rfd::FileDialog::new()
                                         .set_directory(&self.config.output_dir).pick_folder() {
                                     self.config.output_dir = folder;
                                 }
                             });
-                            ui.horizontal(|ui| {
-                                ui.label(language.text("Filename", "Имя файла"));
-                                let width = (ui.available_width() - 44.0).max(80.0);
+                            row(ui, language.text("Filename", "Имя файла"), |ui| {
+                                let width = (ui.available_width() - CONTROL_HEIGHT - ui.spacing().item_spacing.x).max(80.0);
                                 let now = chrono::Local::now().naive_local();
                                 let example = format!("{}.mp4", crate::filename::render(&self.config.filename_template, now, self.config.monitor_index));
-                                let field = ui.add(egui::TextEdit::singleline(&mut self.config.filename_template)
-                                    .desired_width(width).char_limit(120)
+                                let field = ui.add_sized([width, CONTROL_HEIGHT], egui::TextEdit::singleline(&mut self.config.filename_template)
+                                    .horizontal_align(Align::Center)
+                                    .vertical_align(Align::Center)
+                                    .char_limit(120)
                                     .hint_text(crate::filename::DEFAULT_TEMPLATE))
                                     .on_hover_text(format!("{}: {example}", language.text("Example", "Пример")));
                                 let (help_rect, help) = ui.allocate_exact_size(
-                                    Vec2::new(22.0, field.rect.height()), egui::Sense::hover());
+                                    Vec2::new(CONTROL_HEIGHT, CONTROL_HEIGHT), egui::Sense::hover());
                                 ui.painter().text(
                                     egui::pos2(help_rect.center().x, field.rect.center().y),
                                     egui::Align2::CENTER_CENTER, "?", egui::FontId::proportional(13.0),
@@ -864,7 +1014,7 @@ impl HiddenScreenRecorderApp {
                             toggle_row(ui, language.text("Hide window while recording", "Скрывать окно при записи"), &mut self.config.hide_window)
                                 .on_hover_text(language.text("Hide the window and taskbar icon while recording.", "Скрывает окно и значок на панели задач во время записи."));
                             ui.add_space(3.0);
-                            if ui.checkbox(&mut self.config.logging_enabled, language.text("Write diagnostic logs", "Записывать диагностические логи"))
+                            if toggle_row(ui, language.text("Diagnostic logs", "Журнал диагностики"), &mut self.config.logging_enabled)
                                 .on_hover_text(language.text("Write hidden-screen-recorder-debug.log next to the app. Disabled by default.", "Файл hidden-screen-recorder-debug.log рядом с программой. По умолчанию выключено.")).changed() {
                                 debug_log::set_enabled(self.config.logging_enabled);
                                 debug_log::write("diagnostic logging enabled");
@@ -896,7 +1046,7 @@ impl HiddenScreenRecorderApp {
                     ui.add_space(8.0);
                     ui.vertical(|ui| {
                         ui.label(
-                            RichText::new(language.text("Saving recording…", "Сохраняю запись…"))
+                            RichText::new(language.text("Saving recording…", "Сохранение записи…"))
                                 .size(17.0)
                                 .strong()
                                 .color(Color32::from_rgb(237, 241, 252)),
@@ -931,6 +1081,7 @@ impl eframe::App for HiddenScreenRecorderApp {
         let allow_hotkey_start = self.editing_hotkey.is_none() && !self.close_pending;
         self.capture_hotkey(ctx);
         self.poll_background(ctx, allow_hotkey_start);
+        self.update_window_and_audio(ctx);
 
         if self.close_pending && matches!(self.state, AppState::Idle) {
             self.save_config();
@@ -946,6 +1097,10 @@ impl eframe::App for HiddenScreenRecorderApp {
             }
         }
 
+        // Apply a capture setting changed by this frame before the next capture.
+        if self.capture_excluded != self.config.hide_window {
+            self.update_window_and_audio(ctx);
+        }
         // A hidden viewport still has to process hotkeys and recorder events.
         ctx.request_repaint_after(Duration::from_millis(80));
     }
@@ -1008,13 +1163,16 @@ const TEXT: Color32 = Color32::from_rgb(239, 239, 242);
 const MUTED: Color32 = Color32::from_rgb(151, 151, 160);
 const ERROR: Color32 = Color32::from_rgb(245, 85, 96);
 const ACCENT: Color32 = Color32::from_rgb(10, 115, 235);
+const LABEL_WIDTH: f32 = 140.0;
+const VALUE_WIDTH: f32 = 96.0;
+const CONTROL_HEIGHT: f32 = 28.0;
 
 fn configure_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     style.spacing.item_spacing = Vec2::new(10.0, 5.0);
     style.spacing.button_padding = Vec2::new(12.0, 6.0);
     style.spacing.slider_width = 170.0;
-    style.spacing.interact_size.y = 28.0;
+    style.spacing.interact_size.y = CONTROL_HEIGHT;
     style.visuals = egui::Visuals::dark();
     style.visuals.popup_shadow = egui::epaint::Shadow::NONE;
     style.visuals.override_text_color = Some(TEXT);
@@ -1071,24 +1229,156 @@ fn settings_card_state(
 }
 
 fn section_title(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).size(14.0).strong().color(TEXT));
-    ui.add_space(5.0);
+    ui.horizontal(|ui| {
+        ui.set_min_height(CONTROL_HEIGHT);
+        ui.label(RichText::new(title).size(14.0).strong().color(TEXT));
+    });
+    ui.add_space(4.0);
+}
+
+fn audio_level_dbfs(peak: f32) -> Option<f32> {
+    // Values below the meter's −60 dBFS floor are displayed as silence.
+    (peak.is_finite() && peak >= 0.001).then(|| 20.0 * peak.log10())
+}
+
+fn audio_level_text(peak: f32) -> String {
+    audio_level_dbfs(peak).map_or_else(|| "−∞ dBFS".to_owned(), |db| format!("{db:.1} dBFS"))
+}
+
+fn volume_slider(
+    ui: &mut egui::Ui,
+    volume: &mut f32,
+    peak: f32,
+    language: Language,
+    threshold_db: Option<f32>,
+) {
+    // Reserve the rail behind the native thumb and value editor. Only replace
+    // the rail painting; egui keeps drag, keyboard and numeric editing behavior.
+    let rail_shape = ui.painter().add(egui::Shape::Noop);
+    let rail_height = ui.spacing().slider_rail_height.max(6.0);
+    let track_width = (ui.available_width() - VALUE_WIDTH - ui.spacing().item_spacing.x).max(60.0);
+    let response = ui
+        .scope(|ui| {
+            ui.spacing_mut().slider_rail_height = 0.0;
+            ui.spacing_mut().slider_width = track_width;
+            ui.add(
+                Slider::new(volume, 0.0..=1.5)
+                    .trailing_fill(false)
+                    .show_value(false),
+            )
+        })
+        .inner;
+    let mut percent = *volume * 100.0;
+    if ui
+        .add_sized(
+            [VALUE_WIDTH, CONTROL_HEIGHT],
+            egui::DragValue::new(&mut percent)
+                .range(0.0..=150.0)
+                .speed(1.0)
+                .fixed_decimals(0)
+                .suffix("%"),
+        )
+        .changed()
+    {
+        *volume = percent / 100.0;
+    }
+    let level = peak * *volume;
+    // Logarithmic scale keeps speech and quiet sources readable.
+    let fraction = audio_level_dbfs(level).map_or(0.0, |db| ((db + 60.0) / 60.0).clamp(0.0, 1.0));
+    let left = response.rect.left();
+    let width = response.rect.width();
+    let rail = egui::Rect::from_min_size(
+        Pos2::new(left, response.rect.center().y - rail_height / 2.0),
+        Vec2::new(width, rail_height),
+    );
+    let mut shapes = vec![egui::Shape::rect_filled(
+        rail,
+        rail_height / 2.0,
+        Color32::from_rgb(26, 58, 43),
+    )];
+    if fraction > 0.0 {
+        let fill = egui::Rect::from_min_size(rail.min, Vec2::new(width * fraction, rail_height));
+        let color = if level >= 1.0 {
+            Color32::from_rgb(239, 72, 72)
+        } else {
+            Color32::from_rgb(48, 210, 111)
+        };
+        shapes.push(egui::Shape::rect_filled(fill, rail_height / 2.0, color));
+    }
+    if let Some(db) = threshold_db.filter(|_| *volume > 0.0) {
+        let position = ((db + 20.0 * volume.log10() + 60.0) / 60.0).clamp(0.0, 1.0);
+        let x = rail.left() + rail.width() * position;
+        shapes.push(egui::Shape::line_segment(
+            [
+                Pos2::new(x, rail.top() - 2.0),
+                Pos2::new(x, rail.bottom() + 2.0),
+            ],
+            Stroke::new(1.5_f32, Color32::from_rgb(240, 184, 78)),
+        ));
+    }
+    ui.painter().set(rail_shape, egui::Shape::Vec(shapes));
+    response.on_hover_text(if level >= 1.0 {
+        language
+            .text(
+                "Audio clipping — lower the volume",
+                "Перегрузка звука — уменьшите громкость",
+            )
+            .to_owned()
+    } else {
+        audio_level_text(level)
+    });
+}
+
+fn integer_slider(
+    ui: &mut egui::Ui,
+    value: &mut u32,
+    range: std::ops::RangeInclusive<u32>,
+    suffix: &str,
+    unlimited: bool,
+) {
+    let track_width = (ui.available_width() - VALUE_WIDTH - ui.spacing().item_spacing.x).max(60.0);
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = track_width;
+        ui.add(Slider::new(value, range.clone()).show_value(false));
+    });
+    ui.add_sized(
+        [VALUE_WIDTH, CONTROL_HEIGHT],
+        egui::DragValue::new(value)
+            .range(range)
+            .speed(1.0)
+            .suffix(suffix)
+            .custom_formatter(move |value, _| {
+                if unlimited && value < 0.5 {
+                    "∞".to_owned()
+                } else {
+                    format!("{value:.0}")
+                }
+            }),
+    );
 }
 
 fn row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
-        ui.set_min_height(26.0);
-        ui.add_sized(
-            [170.0, 24.0],
-            egui::Label::new(RichText::new(label).size(13.0)).halign(Align::Min),
+        ui.set_min_height(CONTROL_HEIGHT);
+        ui.allocate_ui_with_layout(
+            Vec2::new(LABEL_WIDTH, CONTROL_HEIGHT),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_width(LABEL_WIDTH);
+                ui.label(RichText::new(label).size(13.0));
+            },
         );
-        content(ui);
+        ui.allocate_ui_with_layout(
+            Vec2::new(ui.available_width(), CONTROL_HEIGHT),
+            Layout::left_to_right(Align::Center),
+            content,
+        );
     });
 }
 
 fn toggle_row(ui: &mut egui::Ui, label: &str, value: &mut bool) -> egui::Response {
     ui.horizontal(|ui| {
-        ui.set_min_height(26.0);
+        ui.set_min_height(CONTROL_HEIGHT);
         ui.label(RichText::new(label).size(13.0));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             toggle(ui, value, label)

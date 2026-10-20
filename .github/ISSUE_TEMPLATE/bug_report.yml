@@ -13,7 +13,7 @@ body:
     attributes:
       label: App version / Версия приложения
       description: Release tag or commit; mention if you built it yourself.
-      placeholder: "v0.1.0 or commit SHA"
+      placeholder: "v0.2.0 or commit SHA"
     validations:
       required: true
   - type: input
